@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.consultrio.quitplan"
-    compileSdk = 36
+    compileSdk = 37
     defaultConfig {
         applicationId = "com.consultrio.quitplan"
         minSdk = 26
