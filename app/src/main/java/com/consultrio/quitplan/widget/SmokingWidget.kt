@@ -1,44 +1,21 @@
 package com.consultrio.quitplan.widget
-
 import android.content.Context
 import androidx.compose.ui.unit.dp
-import androidx.glance.GlanceId
-import androidx.glance.GlanceModifier
+import androidx.glance.*
 import androidx.glance.action.ActionParameters
-import androidx.glance.appwidget.GlanceAppWidget
-import androidx.glance.appwidget.GlanceAppWidgetReceiver
-import androidx.glance.appwidget.action.ActionCallback
-import androidx.glance.appwidget.action.actionRunCallback
-import androidx.glance.appwidget.provideContent
-import androidx.glance.appwidget.updateAll
-import androidx.glance.appwidget.components.CircleIconButton
-import androidx.glance.appwidget.components.Scaffold
-import androidx.glance.appwidget.components.TitleBar
+import androidx.glance.appwidget.*
+import androidx.glance.appwidget.action.*
 import androidx.glance.layout.*
 import androidx.glance.text.Text
-import androidx.glance.text.TextStyle
-import androidx.glance.unit.ColorProvider
-import androidx.compose.ui.graphics.Color
-import com.consultrio.quitplan.R
 import com.consultrio.quitplan.data.*
 import com.consultrio.quitplan.domain.*
 import java.time.*
 import java.time.format.DateTimeFormatter
 import kotlin.math.max
-
-class SmokingWidget : GlanceAppWidget() {
- override suspend fun provideGlance(context:Context,id:GlanceId){
-  val s=SettingsStore(context).load();val zone=ZoneId.systemDefault();val today=LocalDate.now(zone);val day=max(0,(today.toEpochDay()-s.planStartEpochDay).toInt());val target=PlanEngine.targetForDay(s.baseline,day,s.reductionAmount,s.reductionEveryDays)
-  val start=today.atStartOfDay(zone).toInstant().toEpochMilli();val end=today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()-1;val dao=DatabaseProvider.get(context).smokingEventDao();val count=dao.countBetween(start,end);val latest=dao.latest()
-  val next=if(latest!=null&&target>0){val last=Instant.ofEpochMilli(latest.estimatedStartAtMillis);if(s.adaptiveWindows)WindowPacingEngine.nextAllowedAt(last,target,s.wakeMinute,s.sleepMinute,s.windows,zone) else SmokingEngine.nextAllowedAt(last,PlanEngine.plannedIntervalMinutes(s.wakeMinute,s.sleepMinute,target))}else null
-  val now=Instant.now();val status=when{target<=0->"Ținta de azi: 0";next==null->"Înregistrează prima țigară";next.isAfter(now)->"Următoarea în ${Duration.between(now,next).toMinutes()+1} min";else->"Poți fuma · amânat ${Duration.between(next,now).toMinutes()} min"};val clock=next?.atZone(zone)?.format(DateTimeFormatter.ofPattern("HH:mm"))
-  provideContent{Column(GlanceModifier.fillMaxSize().padding(12.dp)){Text("QuitPlan · $count / $target azi",style=TextStyle(color=ColorProvider(Color.Black)));Text(status);if(clock!=null&&target>0)Text("Ora planificată: $clock");Spacer(GlanceModifier.height(10.dp));Row(GlanceModifier.fillMaxWidth(),horizontalAlignment=Alignment.CenterHorizontally){Button("APRIND",actionRunCallback<LightNow>());Spacer(GlanceModifier.width(6.dp));Button("FUMEZ",actionRunCallback<SmokingNow>());Spacer(GlanceModifier.width(6.dp));Button("AM FUMAT",actionRunCallback<Smoked>())}}}
- }
- @androidx.glance.appwidget.components.ExperimentalGlanceComponentsApi
- @androidx.compose.runtime.Composable private fun Button(label:String,action:androidx.glance.action.Action){androidx.glance.appwidget.components.Button(text=label,onClick=action,modifier=GlanceModifier.defaultWeight().height(52.dp))}
-}
-class SmokingWidgetReceiver:GlanceAppWidgetReceiver(){override val glanceAppWidget:GlanceAppWidget=SmokingWidget()}
-private suspend fun record(context:Context,action:SmokingActionType){val s=SettingsStore(context).load();val zone=ZoneId.systemDefault();val today=LocalDate.now(zone);val day=max(0,(today.toEpochDay()-s.planStartEpochDay).toInt());val target=PlanEngine.targetForDay(s.baseline,day,s.reductionAmount,s.reductionEveryDays);if(target<=0){SmokingWidget().updateAll(context);return};val pressed=Instant.now();val estimated=SmokingEngine.estimatedStart(pressed,action,s.cigaretteDuration);val dao=DatabaseProvider.get(context).smokingEventDao();val latest=dao.latest();val planned=latest?.let{val last=Instant.ofEpochMilli(it.estimatedStartAtMillis);if(s.adaptiveWindows)WindowPacingEngine.nextAllowedAt(last,target,s.wakeMinute,s.sleepMinute,s.windows,zone)else SmokingEngine.nextAllowedAt(last,PlanEngine.plannedIntervalMinutes(s.wakeMinute,s.sleepMinute,target))};dao.insert(SmokingEvent(pressedAtMillis=pressed.toEpochMilli(),estimatedStartAtMillis=estimated.toEpochMilli(),actionType=action,plannedAtMillis=planned?.toEpochMilli(),deviationMinutes=SmokingEngine.deviationMinutes(estimated,planned)));SmokingWidget().updateAll(context)}
+class SmokingWidget:GlanceAppWidget(){override suspend fun provideGlance(c:Context,id:GlanceId){val s=SettingsStore(c).load();val z=ZoneId.systemDefault();val d=LocalDate.now(z);val learn=s.adaptiveWindows&&AdaptiveLearningEngine.isLearning(s.planStartEpochDay,s.learningDays,d);val idx=if(s.adaptiveWindows)AdaptiveLearningEngine.reductionDayIndex(s.planStartEpochDay,s.learningDays,d)else max(0,(d.toEpochDay()-s.planStartEpochDay).toInt());val t=if(learn)s.baseline else PlanEngine.targetForDay(s.baseline,idx,s.reductionAmount,s.reductionEveryDays);val dao=DatabaseProvider.get(c).smokingEventDao();val start=d.atStartOfDay(z).toInstant().toEpochMilli();val count=dao.countBetween(start,d.plusDays(1).atStartOfDay(z).toInstant().toEpochMilli()-1);val last=dao.latest();val events=dao.eventsSince(LocalDate.ofEpochDay(s.planStartEpochDay).atStartOfDay(z).toInstant().toEpochMilli());val wins=if(s.adaptiveWindows&&!learn)AdaptiveLearningEngine.learnedWindows(events,d,s.wakeMinute,s.sleepMinute,s.weekdayLearning,z).ifEmpty{s.windows}else s.windows;val next=last?.takeIf{t>0}?.let{val i=Instant.ofEpochMilli(it.estimatedStartAtMillis);if(s.adaptiveWindows&&!learn)WindowPacingEngine.nextAllowedAt(i,t,s.wakeMinute,s.sleepMinute,wins,z)else SmokingEngine.nextAllowedAt(i,PlanEngine.plannedIntervalMinutes(s.wakeMinute,s.sleepMinute,t))};val now=Instant.now();val status=when{learn->"Învățare ${((d.toEpochDay()-s.planStartEpochDay+1).toInt()).coerceAtMost(s.learningDays)}/${s.learningDays}";t<=0->"Ținta de azi: 0";next==null->"Înregistrează prima țigară";next.isAfter(now)->"Următoarea în ${Duration.between(now,next).toMinutes()+1} min";else->"Poți fuma · amânat ${Duration.between(next,now).toMinutes()} min"};provideContent{Column(GlanceModifier.fillMaxSize().padding(12.dp)){Text("QuitPlan · $count / $t azi");Text(status);next?.let{Text("Ora planificată: "+it.atZone(z).format(DateTimeFormatter.ofPattern("HH:mm")))};Spacer(GlanceModifier.height(10.dp));Row(GlanceModifier.fillMaxWidth()){Btn("APRIND",actionRunCallback<LightNow>());Spacer(GlanceModifier.width(5.dp));Btn("FUMEZ",actionRunCallback<SmokingNow>());Spacer(GlanceModifier.width(5.dp));Btn("AM FUMAT",actionRunCallback<Smoked>())}}}}
+ @androidx.glance.appwidget.components.ExperimentalGlanceComponentsApi @androidx.compose.runtime.Composable private fun Btn(x:String,a:androidx.glance.action.Action){androidx.glance.appwidget.components.Button(x,a,GlanceModifier.defaultWeight().height(54.dp))}}
+class SmokingWidgetReceiver:GlanceAppWidgetReceiver(){override val glanceAppWidget=SmokingWidget()}
+private suspend fun record(c:Context,a:SmokingActionType){val s=SettingsStore(c).load();val z=ZoneId.systemDefault();val d=LocalDate.now(z);val learn=s.adaptiveWindows&&AdaptiveLearningEngine.isLearning(s.planStartEpochDay,s.learningDays,d);val idx=if(s.adaptiveWindows)AdaptiveLearningEngine.reductionDayIndex(s.planStartEpochDay,s.learningDays,d)else max(0,(d.toEpochDay()-s.planStartEpochDay).toInt());val t=if(learn)s.baseline else PlanEngine.targetForDay(s.baseline,idx,s.reductionAmount,s.reductionEveryDays);if(t<=0)return;val dao=DatabaseProvider.get(c).smokingEventDao();val p=Instant.now();val est=SmokingEngine.estimatedStart(p,a,s.cigaretteDuration);val last=dao.latest();val events=dao.eventsSince(LocalDate.ofEpochDay(s.planStartEpochDay).atStartOfDay(z).toInstant().toEpochMilli());val wins=AdaptiveLearningEngine.learnedWindows(events,d,s.wakeMinute,s.sleepMinute,s.weekdayLearning,z).ifEmpty{s.windows};val planned=last?.let{val i=Instant.ofEpochMilli(it.estimatedStartAtMillis);if(s.adaptiveWindows&&!learn)WindowPacingEngine.nextAllowedAt(i,t,s.wakeMinute,s.sleepMinute,wins,z)else SmokingEngine.nextAllowedAt(i,PlanEngine.plannedIntervalMinutes(s.wakeMinute,s.sleepMinute,t))};dao.insert(SmokingEvent(pressedAtMillis=p.toEpochMilli(),estimatedStartAtMillis=est.toEpochMilli(),actionType=a,plannedAtMillis=planned?.toEpochMilli(),deviationMinutes=SmokingEngine.deviationMinutes(est,planned)));SmokingWidget().updateAll(c)}
 class LightNow:ActionCallback{override suspend fun onAction(context:Context,glanceId:GlanceId,parameters:ActionParameters)=record(context,SmokingActionType.LIGHT_NOW)}
 class SmokingNow:ActionCallback{override suspend fun onAction(context:Context,glanceId:GlanceId,parameters:ActionParameters)=record(context,SmokingActionType.SMOKING_NOW)}
 class Smoked:ActionCallback{override suspend fun onAction(context:Context,glanceId:GlanceId,parameters:ActionParameters)=record(context,SmokingActionType.SMOKED)}
