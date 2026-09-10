@@ -17,6 +17,7 @@ interface SmokingEventDao {
     @Query("SELECT * FROM smoking_events ORDER BY estimatedStartAtMillis DESC LIMIT 1") suspend fun latest(): SmokingEvent?
     @Query("SELECT * FROM smoking_events ORDER BY estimatedStartAtMillis DESC LIMIT :limit") suspend fun recent(limit: Int = 100): List<SmokingEvent>
     @Query("SELECT COUNT(*) FROM smoking_events WHERE estimatedStartAtMillis >= :start") suspend fun countSince(start: Long): Int
+    @Query("SELECT * FROM smoking_events WHERE estimatedStartAtMillis >= :start ORDER BY estimatedStartAtMillis ASC") suspend fun eventsSince(start: Long): List<SmokingEvent>
 }
 
 @Dao
