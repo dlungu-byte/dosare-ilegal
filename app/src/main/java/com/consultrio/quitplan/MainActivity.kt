@@ -4,44 +4,53 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.consultrio.quitplan.data.*
 import com.consultrio.quitplan.domain.PlanEngine
 import com.consultrio.quitplan.domain.SmokingEngine
+import com.consultrio.quitplan.widget.SmokingWidget
 import kotlinx.coroutines.launch
 import java.time.*
 import java.time.format.DateTimeFormatter
+import kotlin.math.max
 
 class MainActivity : ComponentActivity() {
-    private val settings = UserSettings()
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent { MaterialTheme {
-            var smokedToday by remember { mutableIntStateOf(0) }; var nextAt by remember { mutableStateOf<Instant?>(null) }
-            val target = settings.baselineCigarettesPerDay
-            val interval = PlanEngine.plannedIntervalMinutes(settings.wakeMinuteOfDay, settings.sleepMinuteOfDay, target)
-            LaunchedEffect(Unit) { smokedToday = countToday(); nextAt = DatabaseProvider.get(this@MainActivity).smokingEventDao().latest()?.let { SmokingEngine.nextAllowedAt(Instant.ofEpochMilli(it.estimatedStartAtMillis), interval) } }
-            HomeScreen(smokedToday, target, nextAt) { action -> lifecycleScope.launch { register(action, interval); smokedToday = countToday(); nextAt = DatabaseProvider.get(this@MainActivity).smokingEventDao().latest()?.let { SmokingEngine.nextAllowedAt(Instant.ofEpochMilli(it.estimatedStartAtMillis), interval) } } }
-        } }
-    }
-    private suspend fun register(action: SmokingActionType, interval: Int) {
-        val pressed = Instant.now(); val estimated = SmokingEngine.estimatedStart(pressed, action, settings.cigaretteDurationMinutes)
-        val latest = DatabaseProvider.get(this).smokingEventDao().latest(); val planned = latest?.let { SmokingEngine.nextAllowedAt(Instant.ofEpochMilli(it.estimatedStartAtMillis), interval) }
-        DatabaseProvider.get(this).smokingEventDao().insert(SmokingEvent(pressedAtMillis=pressed.toEpochMilli(), estimatedStartAtMillis=estimated.toEpochMilli(), actionType=action, plannedAtMillis=planned?.toEpochMilli(), deviationMinutes=SmokingEngine.deviationMinutes(estimated, planned)))
-    }
-    private suspend fun countToday(): Int { val zone=ZoneId.systemDefault(); val start=LocalDate.now(zone).atStartOfDay(zone).toInstant().toEpochMilli(); val end=LocalDate.now(zone).plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()-1; return DatabaseProvider.get(this).smokingEventDao().countBetween(start,end) }
-}
+    private lateinit var store: SettingsStore
+    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); store=SettingsStore(this); setContent { MaterialTheme { QuitPlanApp() } } }
 
-@Composable private fun HomeScreen(smokedToday:Int,target:Int,nextAt:Instant?,onAction:(SmokingActionType)->Unit) {
-    val zone=ZoneId.systemDefault(); val nextText=nextAt?.atZone(zone)?.format(DateTimeFormatter.ofPattern("HH:mm"))?:"—"; val remaining=nextAt?.let{Duration.between(Instant.now(),it).toMinutes()}?:0
-    val status=if(nextAt==null) "Înregistrează prima țigară" else if(remaining>0) "Mai ai aproximativ $remaining min" else "Poți fuma acum"
-    Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement=Arrangement.spacedBy(20.dp)) {
-        Text("QuitPlan",style=MaterialTheme.typography.headlineMedium); Text("$smokedToday / $target azi",style=MaterialTheme.typography.headlineLarge); Text(status,style=MaterialTheme.typography.titleLarge); Text("Următoarea: $nextText")
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){ Button(onClick={onAction(SmokingActionType.LIGHT_NOW)}){Text("Aprind")}; Button(onClick={onAction(SmokingActionType.SMOKING_NOW)}){Text("Fumez")}; Button(onClick={onAction(SmokingActionType.SMOKED)}){Text("Am fumat")} }
+    @Composable private fun QuitPlanApp() {
+        var settings by remember { mutableStateOf(store.load()) }; var tab by remember { mutableIntStateOf(0) }; var refresh by remember { mutableIntStateOf(0) }
+        if(!settings.onboardingDone){ SettingsScreen(settings,true){ settings=it.copy(onboardingDone=true,planStartEpochDay=LocalDate.now().toEpochDay()); store.save(settings); refresh++ }; return }
+        Scaffold(bottomBar={ NavigationBar { listOf("Acasă","Plan","Progres","Istoric","Setări").forEachIndexed{i,n->NavigationBarItem(selected=tab==i,onClick={tab=i},icon={Text(listOf("⌂","▦","↗","≡","⚙")[i])},label={Text(n)})} } }){ pad ->
+            Box(Modifier.padding(pad)){ key(refresh){ when(tab){0->Home(settings){action->lifecycleScope.launch{register(action,settings);refresh++;SmokingWidget().updateAll(this@MainActivity)}};1->PlanScreen(settings);2->ProgressScreen(settings);3->HistoryScreen{refresh++};else->SettingsScreen(settings,false){settings=it;store.save(it);refresh++}} } }
+        }
     }
+
+    private fun target(s:StoredSettings,date:LocalDate=LocalDate.now()):Int { val day=max(0,(date.toEpochDay()-s.planStartEpochDay).toInt()); return PlanEngine.targetForDay(s.baseline,day,s.reductionAmount,s.reductionEveryDays) }
+    private suspend fun register(action:SmokingActionType,s:StoredSettings){ val t=target(s); if(t<=0)return; val interval=PlanEngine.plannedIntervalMinutes(s.wakeMinute,s.sleepMinute,t); val pressed=Instant.now(); val estimated=SmokingEngine.estimatedStart(pressed,action,s.cigaretteDuration); val latest=DatabaseProvider.get(this).smokingEventDao().latest(); val planned=latest?.let{SmokingEngine.nextAllowedAt(Instant.ofEpochMilli(it.estimatedStartAtMillis),interval)}; DatabaseProvider.get(this).smokingEventDao().insert(SmokingEvent(pressedAtMillis=pressed.toEpochMilli(),estimatedStartAtMillis=estimated.toEpochMilli(),actionType=action,plannedAtMillis=planned?.toEpochMilli(),deviationMinutes=SmokingEngine.deviationMinutes(estimated,planned))) }
+    private fun bounds(date:LocalDate=LocalDate.now()):Pair<Long,Long>{val z=ZoneId.systemDefault();return date.atStartOfDay(z).toInstant().toEpochMilli() to (date.plusDays(1).atStartOfDay(z).toInstant().toEpochMilli()-1)}
+
+    @Composable private fun Home(s:StoredSettings,onAction:(SmokingActionType)->Unit){ var count by remember{mutableIntStateOf(0)};var latest by remember{mutableStateOf<SmokingEvent?>(null)}; val t=target(s); LaunchedEffect(Unit){val b=bounds();val dao=DatabaseProvider.get(this@MainActivity).smokingEventDao();count=dao.countBetween(b.first,b.second);latest=dao.latest()}; val interval=PlanEngine.plannedIntervalMinutes(s.wakeMinute,s.sleepMinute,t);val next=latest?.let{SmokingEngine.nextAllowedAt(Instant.ofEpochMilli(it.estimatedStartAtMillis),interval)}; var now by remember{mutableStateOf(Instant.now())};LaunchedEffect(next){while(true){now=Instant.now();kotlinx.coroutines.delay(1000)}}; val mins=next?.let{Duration.between(now,it).toMinutes()}; val status=when{t==0->"Plan încheiat · ținta este zero";next==null->"Înregistrează prima țigară când apare";next.isAfter(now)->"Următoarea țigară planificată în ${Duration.between(now,next).toMinutes()+1} min";else->"Poți fuma acum · ai amânat ${Duration.between(next,now).toMinutes()} min"}
+        LazyColumn(Modifier.fillMaxSize().padding(20.dp),verticalArrangement=Arrangement.spacedBy(16.dp),horizontalAlignment=Alignment.CenterHorizontally){item{Text("QuitPlan",style=MaterialTheme.typography.headlineMedium)};item{Card{Column(Modifier.padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally){Text("$count / $t azi",style=MaterialTheme.typography.displaySmall);Text(status);if(next!=null)Text("Ora planificată: "+next.atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm")))}}};item{Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){Button(onClick={onAction(SmokingActionType.LIGHT_NOW)},enabled=t>0){Text("Aprind")};Button(onClick={onAction(SmokingActionType.SMOKING_NOW)},enabled=t>0){Text("Fumez")};Button(onClick={onAction(SmokingActionType.SMOKED)},enabled=t>0){Text("Am fumat")}}};item{Text("Interval minim recomandat azi: $interval minute. Dacă amâni o țigară, timpul câștigat se păstrează; aplicația nu comprimă intervalele ca să recuperezi țigările nefumate.")}}
+    }
+
+    @Composable private fun PlanScreen(s:StoredSettings){val targets=PlanEngine.buildTargets(s.baseline,s.reductionAmount,s.reductionEveryDays);LazyColumn(Modifier.fillMaxSize().padding(20.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Text("Planul de reducere",style=MaterialTheme.typography.headlineMedium);Text("Start: ${LocalDate.ofEpochDay(s.planStartEpochDay)} · aproximativ ${targets.size-1} zile până la zero")};items(targets.take(120).withIndex().toList()){(i,t)->Card(Modifier.fillMaxWidth()){Row(Modifier.padding(14.dp).fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text(LocalDate.ofEpochDay(s.planStartEpochDay).plusDays(i.toLong()).toString());Text("$t țigări")}}}}}
+
+    @Composable private fun ProgressScreen(s:StoredSettings){var actual by remember{mutableIntStateOf(0)};val elapsed=max(1,(LocalDate.now().toEpochDay()-s.planStartEpochDay+1).toInt());LaunchedEffect(Unit){val z=ZoneId.systemDefault();actual=DatabaseProvider.get(this@MainActivity).smokingEventDao().countSince(LocalDate.ofEpochDay(s.planStartEpochDay).atStartOfDay(z).toInstant().toEpochMilli())};val baselineExpected=s.baseline*elapsed;val avoided=max(0,baselineExpected-actual);val cost=s.packPrice/s.packSize;val saved=avoided*cost;val targets=PlanEngine.buildTargets(s.baseline,s.reductionAmount,s.reductionEveryDays);val day=max(0,(LocalDate.now().toEpochDay()-s.planStartEpochDay).toInt());val remainingCigs=targets.drop(day+1).sum();val remainingPacks=remainingCigs.toDouble()/s.packSize;Column(Modifier.fillMaxSize().padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)){Text("Progres",style=MaterialTheme.typography.headlineMedium);Metric("Țigări evitate față de consumul inițial",avoided.toString());Metric("Economisit","%.2f lei".format(saved));Metric("Echivalent pachete evitate","%.1f".format(avoided.toDouble()/s.packSize));Metric("Ultimele pachete estimate","%.1f pachete · %d țigări".format(remainingPacks,remainingCigs));if(s.packsOwned>0)Metric("De cumpărat estimativ","%.1f pachete".format(max(0.0,remainingPacks-s.packsOwned)));Text("Economiile sunt calculate față de consumul inițial de ${s.baseline}/zi, pe baza țigărilor înregistrate efectiv.")}}
+    @Composable private fun Metric(name:String,value:String){Card(Modifier.fillMaxWidth()){Column(Modifier.padding(16.dp)){Text(name);Text(value,style=MaterialTheme.typography.headlineSmall)}}}
+
+    @Composable private fun HistoryScreen(onChanged:()->Unit){var events by remember{mutableStateOf(emptyList<SmokingEvent>())};fun load(){lifecycleScope.launch{events=DatabaseProvider.get(this@MainActivity).smokingEventDao().recent()}};LaunchedEffect(Unit){load()};LazyColumn(Modifier.fillMaxSize().padding(20.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Text("Istoric",style=MaterialTheme.typography.headlineMedium)};items(events,key={it.id}){e->Card(Modifier.fillMaxWidth()){Row(Modifier.padding(12.dp).fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(Instant.ofEpochMilli(e.estimatedStartAtMillis).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")));Text(when(e.actionType){SmokingActionType.LIGHT_NOW->"Aprind acum";SmokingActionType.SMOKING_NOW->"Fumez acum";SmokingActionType.SMOKED->"Am fumat"})};TextButton(onClick={lifecycleScope.launch{DatabaseProvider.get(this@MainActivity).smokingEventDao().deleteById(e.id);load();onChanged()}}){Text("Șterge")}}}}}}
+
+    @Composable private fun SettingsScreen(initial:StoredSettings,onboarding:Boolean,onSave:(StoredSettings)->Unit){var baseline by remember{mutableStateOf(initial.baseline.toString())};var wake by remember{mutableStateOf(minutesToTime(initial.wakeMinute))};var sleep by remember{mutableStateOf(minutesToTime(initial.sleepMinute))};var reduction by remember{mutableStateOf(initial.reductionAmount.toString())};var every by remember{mutableStateOf(initial.reductionEveryDays.toString())};var duration by remember{mutableStateOf(initial.cigaretteDuration.toString())};var price by remember{mutableStateOf(initial.packPrice.toString())};var size by remember{mutableStateOf(initial.packSize.toString())};var owned by remember{mutableStateOf(initial.packsOwned.toString())};LazyColumn(Modifier.fillMaxSize().padding(20.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){item{Text(if(onboarding)"Configurează planul" else "Setări",style=MaterialTheme.typography.headlineMedium);if(onboarding)Text("Datele rămân numai pe telefon.")};item{NumField("Țigări pe zi acum",baseline){baseline=it}};item{TextField(wake,{wake=it},label={Text("Trezire (HH:mm)")},modifier=Modifier.fillMaxWidth())};item{TextField(sleep,{sleep=it},label={Text("Somn (HH:mm)")},modifier=Modifier.fillMaxWidth())};item{NumField("Reduc cu câte țigări",reduction){reduction=it}};item{NumField("La câte zile",every){every=it}};item{NumField("Durata unei țigări (minute)",duration){duration=it}};item{NumField("Preț pachet (lei)",price,true){price=it}};item{NumField("Țigări într-un pachet",size){size=it}};item{NumField("Pachete pe care le ai deja",owned,true){owned=it}};item{Button(onClick={val b=baseline.toIntOrNull()?.coerceAtLeast(1)?:20;val r=reduction.toIntOrNull()?.coerceAtLeast(1)?:1;val ev=every.toIntOrNull()?.coerceAtLeast(1)?:1;onSave(initial.copy(baseline=b,wakeMinute=timeToMinutes(wake)?:420,sleepMinute=timeToMinutes(sleep)?:1380,reductionAmount=r,reductionEveryDays=ev,cigaretteDuration=duration.toIntOrNull()?.coerceAtLeast(1)?:5,packPrice=price.replace(',','.').toDoubleOrNull()?.coerceAtLeast(0.0)?:30.0,packSize=size.toIntOrNull()?.coerceAtLeast(1)?:20,packsOwned=owned.replace(',','.').toDoubleOrNull()?.coerceAtLeast(0.0)?:0.0))},modifier=Modifier.fillMaxWidth()){Text(if(onboarding)"Începe planul" else "Salvează")}}}}
+    @Composable private fun NumField(label:String,value:String,decimal:Boolean=false,on:(String)->Unit){TextField(value,on,label={Text(label)},keyboardOptions=KeyboardOptions(keyboardType=if(decimal)KeyboardType.Decimal else KeyboardType.Number),modifier=Modifier.fillMaxWidth())}
+    private fun minutesToTime(m:Int)="%02d:%02d".format((m/60)%24,m%60);private fun timeToMinutes(v:String):Int?{val p=v.split(":");if(p.size!=2)return null;val h=p[0].toIntOrNull()?:return null;val m=p[1].toIntOrNull()?:return null;if(h !in 0..23||m !in 0..59)return null;return h*60+m}
 }
